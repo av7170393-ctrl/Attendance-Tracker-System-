@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AttendX Demo</title>
+<style>
+:root{
+  --bg:#f5f7fa; --card:#fff; --border:#e5e9f0; --text:#1c2430; --muted:#66707d;
+  --primary:#0d6efd; --success:#198754; --warning:#b8860b; --danger:#dc3545;
+  box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){ --bg:#12161c; --card:#1b212b; --border:#2a323e; --text:#e7ecf2; --muted:#9aa5b1; }
+}
+:root[data-theme="dark"]{ --bg:#12161c; --card:#1b212b; --border:#2a323e; --text:#e7ecf2; --muted:#9aa5b1; }
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px}
+h1,h2,h3{margin:0 0 8px}
+.muted{color:var(--muted);font-size:.9em}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.78em;font-weight:600}
+.b-green{background:#19875422;color:var(--success)}
+.b-yellow{background:#b8860b22;color:var(--warning)}
+.b-red{background:#dc354522;color:var(--danger)}
+.btn{display:inline-block;padding:8px 14px;border-radius:6px;border:1px solid var(--primary);background:var(--primary);color:#fff;cursor:pointer;font-size:.9em}
+.btn.outline{background:transparent;color:var(--primary)}
+.btn.danger{background:var(--danger);border-color:var(--danger)}
+input,select,textarea{width:100%;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);margin-bottom:8px;font-size:.95em}
+table{width:100%;border-collapse:collapse;font-size:.9em}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.stat h2{margin:0;font-size:1.6em}
+.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.nav button{padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer}
+.nav button.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.hidden{display:none}
+.note{font-size:.82em;color:var(--muted);border-left:3px solid var(--primary);padding:6px 10px;background:var(--primary)11}
+#qrbox canvas{margin:8px auto;display:block}
+.tableWrap{overflow-x:auto}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+/* ---------- Demo data layer (all client-side; for illustration only) ---------- */
+const KEY = "attendx_demo_v2";
+function seed(){
+  return {
+    users: {
+      "admin@attendx.demo":   {password:"Demo@1234", role:"admin",   name:"System Administrator"},
+      "faculty@attendx.demo": {password:"Demo@1234", role:"faculty", name:"Dr. Neha Kapoor"},
+      "student@attendx.demo": {password:"Demo@1234", role:"student", name:"Rohan Sharma", roll:"CSE24A-001"},
+      "student2@attendx.demo":{password:"Demo@1234", role:"student", name:"Ananya Iyer", roll:"CSE24A-002"},
+    },
+    subjects: [
+      {id:1,name:"Python Programming",code:"CSE201"},
+      {id:2,name:"Data Structures",code:"CSE202"},
+      {id:3,name:"DBMS",code:"CSE203"},
+    ],
+    sessions: [], // {id,subjectId,createdAt,expiresAt,token,status}
+    records: [],  // {sessionId,email}
+    corrections: [], // {id,email,sessionId,reason,status}
+    nextId: 1,
+  };
+}
+let storageOk = true;
+function load(){ try{ return JSON.parse(localStorage.getItem(KEY)) || seed(); }catch(e){ storageOk=false; return seed(); } }
+function save(s){ try{ localStorage.setItem(KEY, JSON.stringify(s)); }catch(e){ storageOk=false; /* keep going in-memory */ } }
+let state = load();
+if(!state.users) state = seed();
+
+let session = null; // {email, role, name}
+
+let resetArmed = false;
+window.resetDemo = ()=>{
+  // Native confirm() dialogs can be silently blocked in some in-app browsers,
+  // so this uses a safer two-tap inline confirmation instead.
+  if(!resetArmed){
+    resetArmed = true;
+    loginMsg = "Tap 'Reset all demo data' again to confirm — this erases everything in this browser.";
+    renderLogin();
+    return;
+  }
+  try{ localStorage.removeItem(KEY); }catch(e){}
+  state = seed();
+  session = null; resetArmed = false; loginMode="login"; loginMsg="Demo data reset — starting fresh.";
+  render();
+};
+
+/* ---------- Attendance math (mirrors the real app's rule-based logic) ---------- */
+function subjectStats(email){
+  return state.subjects.map(sub=>{
+    const sessions = state.sessions.filter(s=>s.subjectId===sub.id);
+    const conducted = sessions.length;
+    const attended = sessions.filter(s=>state.records.some(r=>r.sessionId===s.id && r.email===email)).length;
+    const pct = conducted? Math.round((attended/conducted)*1000)/10 : 0;
+    const risk = pct>=80?"green":pct>=75?"yellow":"red";
+    return {...sub, conducted, attended, pct, risk};
+  });
+}
+function overallStats(email){
+  const rows = subjectStats(email);
+  const conducted = rows.reduce((a,r)=>a+r.conducted,0);
+  const attended = rows.reduce((a,r)=>a+r.attended,0);
+  const pct = conducted? Math.round((attended/conducted)*1000)/10 : 0;
+  return {conducted, attended, missed:conducted-attended, pct, risk: pct>=80?"green":pct>=75?"yellow":"red"};
+}
+function classesNeeded(attended,conducted,target){
+  if(!conducted) return 0;
+  if((attended/conducted)*100 >= target) return 0;
+  const t=target/100;
+  return Math.max(0, Math.ceil(((t*conducted-attended)/(1-t)).toFixed(6)));
+}
+function classesMissable(attended,conducted,target){
+  if(!conducted) return 0;
+  const t=target/100;
+  return Math.max(0, Math.floor(((attended/t)-conducted).toFixed(6)));
+}
+
+/* ---------- Router / render ---------- */
+function badge(risk){ return `<span class="badge b-${risk}">${risk==="green"?"On track":risk==="yellow"?"Watch":"Below target"}</span>`; }
+function el(html){ document.getElementById("app").innerHTML = html; }
+function nav(tabs, active){
+  return `<div class="nav">${tabs.map(t=>`<button class="${t.key===active?'active':''}" onclick="go('${t.key}')">${t.label}</button>`).join("")}</div>`;
+}
+let currentTab = "dashboard";
+window.go = (tab)=>{ currentTab = tab; render(); };
+
+function render(){
+  if(!session){ renderLogin(); return; }
+  if(session.role==="admin") renderAdmin();
+  else if(session.role==="faculty") renderFaculty();
+  else renderStudent();
+}
+
+function renderTopbar(){
+  return `<div class="topbar">
+    <div><strong>AttendX</strong> <span class="muted">demo</span></div>
+    <div class="muted">${session.name} · ${session.role} &nbsp; <button class="btn outline" onclick="logout()">Logout</button></div>
+  </div>`;
+}
+window.logout = ()=>{ session=null; render(); };
+
+let loginMode = "login"; // "login" | "forgot-password" | "forgot-email"
+let loginMsg = "";
+let loginOk = false;
+let fpFound = null; // email found during forgot-password flow
+let feResults = [];
+window.setLoginMode = (m)=>{ loginMode=m; loginMsg=""; loginOk=false; fpFound=null; feResults=[]; resetArmed=false; renderLogin(); };
+
+function nameFromEmail(email){
+  const raw = email.split("@")[0].replace(/[._-]+/g," ").trim();
+  return raw.replace(/\b\w/g, c=>c.toUpperCase()) || "New User";
+}
+
+function renderLogin(){
+  let body="";
+  if(loginMode==="forgot-password"){
+    body = fpFound ? `
+      <p class="muted">Account found: <strong>${state.users[fpFound].name}</strong> (${fpFound})</p>
+      <input id="newpw" placeholder="New password" type="password">
+      <button type="button" class="btn" style="width:100%" onclick="doResetPassword()">Set new password & log in</button>
+    ` : `
+      <input id="fpEmail" placeholder="Your email">
+      <button type="button" class="btn" style="width:100%" onclick="doFindForReset()">Find my account</button>
+    `;
+    body += `<p class="muted" style="text-align:center;margin-top:8px"><a href="#" onclick="setLoginMode('login');return false;">&larr; Back to login</a></p>`;
+  } else if(loginMode==="forgot-email"){
+    body = `
+      <input id="feName" placeholder="Your full name">
+      <button type="button" class="btn" style="width:100%" onclick="doFindEmail()">Find my email</button>
+      ${feResults.length ? `<div style="margin-top:10px">${feResults.map(e=>`<div class="note" style="margin-bottom:6px">${e}</div>`).join("")}</div>` : ``}
+      <p class="muted" style="text-align:center;margin-top:8px"><a href="#" onclick="setLoginMode('login');return false;">&larr; Back to login</a></p>
+    `;
+  } else {
+    body = `
+      <input id="email" placeholder="Any email — new or existing">
+      <input id="pw" placeholder="Password" type="password">
+      <input id="loginName" placeholder="Your name (only used if this is a new account)">
+      <select id="loginRole">
+        <option value="student">Login/signup as: Student</option>
+        <option value="faculty">Login/signup as: Faculty</option>
+        <option value="admin">Login/signup as: Admin</option>
+      </select>
+      <button type="button" class="btn" style="width:100%" onclick="doLogin()">Log in</button>
+      <p class="muted" style="text-align:center;margin-top:8px">
+        <a href="#" onclick="setLoginMode('forgot-password');return false;">Forgot password?</a> &middot;
+        <a href="#" onclick="setLoginMode('forgot-email');return false;">Forgot email?</a>
+      </p>
+      <p class="note" style="margin-top:10px">If this email is new, the Role dropdown decides what account gets created. If it already exists, the dropdown is ignored — you log in with whatever role it already has. Built-in demo accounts (password <code>Demo@1234</code>): admin@attendx.demo · faculty@attendx.demo · student@attendx.demo</p>
+      <p class="muted" style="text-align:center;margin-top:10px"><a href="#" onclick="resetDemo();return false;">Reset all demo data (fresh start, no attendance/accounts)</a></p>
+    `;
+  }
+  el(`
+    <div class="wrap" style="max-width:380px;margin-top:40px">
+      <div class="card">
+        <h2 style="text-align:center">AttendX</h2>
+        <p class="muted" style="text-align:center">Track. Analyze. Improve.</p>
+        ${loginMsg ? `<p class="note" style="border-color:var(--danger);color:var(--danger)">${loginMsg}</p>` : ``}
+        ${body}
+        <p class="note" style="margin-top:10px">This is a self-contained front-end simulation for demonstration — data lives only in this browser (localStorage), there's no real server/auth/email behind it (so "forgot password" resets it directly instead of emailing a link). The full secure Flask+RBAC backend is the version delivered separately as source code.</p>
+        ${!storageOk ? `<p class="note" style="border-color:var(--danger)">Note: this browser is blocking local storage, so your data won't be saved between page reloads — everything will still work within this session.</p>` : ``}
+      </div>
+    </div>`);
+}
+
+window.doLogin = ()=>{
+  try{
+    const email = (document.getElementById("email").value||"").trim().toLowerCase();
+    const pw = document.getElementById("pw").value||"";
+    if(!email || !pw){ loginMsg="Please enter both email and password."; renderLogin(); return; }
+    let u = state.users[email];
+    if(!u){
+      // Any email works: auto-create an account on first login, using the chosen role/name.
+      const role = (document.getElementById("loginRole")||{}).value || "student";
+      const typedName = ((document.getElementById("loginName")||{}).value || "").trim();
+      u = {password:pw, role, name: typedName || nameFromEmail(email), active:true,
+           roll: role==="student" ? ("SELF-"+Math.random().toString(36).slice(2,7).toUpperCase()) : undefined};
+      state.users[email] = u;
+      save(state);
+    } else if(u.password!==pw){
+      loginMsg="That email exists but the password is wrong. Use 'Forgot password?' below to reset it.";
+      renderLogin(); return;
+    } else if(u.active===false){
+      loginMsg="This account has been deactivated by an admin.";
+      renderLogin(); return;
+    }
+    session = {email, role:u.role, name:u.name};
+    currentTab="dashboard"; loginMsg=""; render();
+  }catch(err){ loginMsg="Something went wrong: "+err.message; renderLogin(); }
+};
+
+window.doFindForReset = ()=>{
+  try{
+    const email = (document.getElementById("fpEmail").value||"").trim().toLowerCase();
+    if(!state.users[email]){ loginMsg="No account found with that email in this browser's demo data."; renderLogin(); return; }
+    fpFound = email; loginMsg=""; renderLogin();
+  }catch(err){ loginMsg="Something went wrong: "+err.message; renderLogin(); }
+};
+window.doResetPassword = ()=>{
+  try{
+    const newpw = document.getElementById("newpw").value||"";
+    if(!newpw){ loginMsg="Please enter a new password."; renderLogin(); return; }
+    state.users[fpFound].password = newpw;
+    save(state);
+    session = {email:fpFound, role:state.users[fpFound].role, name:state.users[fpFound].name};
+    loginMode="login"; fpFound=null; currentTab="dashboard"; loginMsg=""; render();
+  }catch(err){ loginMsg="Something went wrong: "+err.message; renderLogin(); }
+};
+
+window.doFindEmail = ()=>{
+  try{
+    const name = (document.getElementById("feName").value||"").trim().toLowerCase();
+    if(!name){ loginMsg="Please enter a name to search."; renderLogin(); return; }
+    feResults = Object.entries(state.users)
+      .filter(([,u])=>u.name.toLowerCase().includes(name))
+      .map(([email,u])=>`${u.name} → ${email}`);
+    if(!feResults.length) loginMsg="No account found with that name in this browser's demo data.";
+    else loginMsg="";
+    renderLogin();
+  }catch(err){ loginMsg="Something went wrong: "+err.message; renderLogin(); }
+};
+
+/* ---------- Student ---------- */
+function renderStudent(){
+  const tabs=[{key:"dashboard",label:"Dashboard"},{key:"calculator",label:"Calculator"},{key:"scan",label:"Scan QR"},{key:"corrections",label:"Corrections"}];
+  let body="";
+  if(currentTab==="dashboard"){
+    const o=overallStats(session.email), rows=subjectStats(session.email);
+    body=`<div class="grid">
+      <div class="card stat"><div class="muted">Overall %</div><h2>${o.pct}%</h2></div>
+      <div class="card stat"><div class="muted">Conducted</div><h2>${o.conducted}</h2></div>
+      <div class="card stat"><div class="muted">Attended</div><h2>${o.attended}</h2></div>
+      <div class="card stat"><div class="muted">Missed</div><h2>${o.missed}</h2></div>
+    </div>
+    <div class="card"><h3>Subject-wise</h3><div class="tableWrap"><table><tr><th>Subject</th><th>Conducted</th><th>Attended</th><th>%</th><th>Status</th></tr>
+      ${rows.map(r=>`<tr><td>${r.name}</td><td>${r.conducted}</td><td>${r.attended}</td><td>${r.pct}%</td><td>${badge(r.risk)}</td></tr>`).join("")}
+    </table></div></div>`;
+  } else if(currentTab==="calculator"){
+    const target=76;
+    const rows=subjectStats(session.email).map(r=>({...r, need:classesNeeded(r.attended,r.conducted,target), miss:classesMissable(r.attended,r.conducted,target)}));
+    body=`<div class="card"><h3>Smart Attendance Calculator (target ${target}%)</h3>
+      <p class="muted">Rule-based math, not AI.</p>
+      <div class="tableWrap"><table><tr><th>Subject</th><th>%</th><th>Classes needed</th><th>Can still miss</th></tr>
+      ${rows.map(r=>`<tr><td>${r.name}</td><td>${r.pct}%</td><td>${r.need===0?'Met':r.need}</td><td>${r.miss}</td></tr>`).join("")}
+      </table></div></div>`;
+  } else if(currentTab==="scan"){
+    body=`<div class="card"><h3>Scan QR (camera)</h3>
+      <p class="muted">Point your camera at your faculty's screen — needs a <strong>second device</strong> (their screen can't scan itself). Requires camera permission.</p>
+      <div id="reader" style="width:100%;max-width:320px;margin:0 auto"></div>
+      <button class="btn outline" style="width:100%;margin-top:8px" onclick="startCameraScan()">Start camera</button>
+      <div id="scanResult" style="margin-top:8px"></div>
+    </div>
+    <div class="card"><h3>Or type the code manually</h3>
+      <p class="muted">Only use this if the camera genuinely doesn't work — in a real deployment this is the weaker, fallback path since a typed code can be shared over chat.</p>
+      <textarea id="tok" rows="2" placeholder="Paste attendance code"></textarea>
+      <button class="btn" onclick="markAttendance()">Submit</button>
+      <div id="scanResult2" style="margin-top:8px"></div></div>`;
+  } else if(currentTab==="corrections"){
+    const mine = state.corrections.filter(c=>c.email===session.email);
+    const eligible = state.sessions.filter(s=> Date.now() > s.expiresAt && !state.records.some(r=>r.sessionId===s.id && r.email===session.email)
+      && !mine.some(c=>c.sessionId===s.id && c.status!=="rejected"));
+    body=`<div class="card"><h3>Request a Correction</h3>
+      ${eligible.length? `<select id="corSession">${eligible.map(s=>`<option value="${s.id}">${subjName(s.subjectId)} — session #${s.id}</option>`).join("")}</select>
+      <input id="corReason" placeholder="Reason">
+      <button class="btn" onclick="submitCorrection()">Submit</button>` : `<p class="muted">No eligible classes right now.</p>`}
+    </div>
+    <div class="card"><h3>My Requests</h3><div class="tableWrap"><table><tr><th>Session</th><th>Reason</th><th>Status</th></tr>
+      ${mine.map(c=>`<tr><td>${subjName(state.sessions.find(s=>s.id===c.sessionId)?.subjectId)}</td><td>${c.reason}</td><td>${badge(c.status==='approved'?'green':c.status==='rejected'?'red':'yellow')}</td></tr>`).join("") || '<tr><td colspan=3 class="muted">None yet.</td></tr>'}
+    </table></div></div>`;
+  }
+  el(renderTopbar()+nav(tabs,currentTab)+body);
+}
+function subjName(id){ return state.subjects.find(s=>s.id===id)?.name || "Subject"; }
+function tryMarkAttendance(rawTok, boxId){
+  let tok=(rawTok||"").trim();
+  // Be forgiving: if the person also pasted the "(expires ...)" hint text or
+  // extra whitespace/lines, pull just the ATX-#-xxxxxxxx token out of it.
+  const extracted = tok.match(/ATX-\d+-[a-z0-9]+/i);
+  if(extracted) tok = extracted[0];
+  const s = state.sessions.find(x=>x.token===tok);
+  const box=document.getElementById(boxId);
+  if(!box) return;
+  if(!s){ box.innerHTML=`<span class="badge b-red">Invalid code.</span>`; return; }
+  if(Date.now() > s.expiresAt){ box.innerHTML=`<span class="badge b-red">This attendance session has expired.</span>`; return; }
+  if(state.records.some(r=>r.sessionId===s.id && r.email===session.email)){ box.innerHTML=`<span class="badge b-yellow">Attendance already recorded for this session.</span>`; return; }
+  state.records.push({sessionId:s.id, email:session.email}); save(state);
+  box.innerHTML=`<span class="badge b-green">Attendance marked successfully for ${subjName(s.subjectId)}.</span>`;
+}
+window.markAttendance = ()=>{
+  tryMarkAttendance(document.getElementById("tok").value, "scanResult2");
+};
+
+let cameraScanner = null;
+window.startCameraScan = ()=>{
+  const box = document.getElementById("scanResult");
+  if(typeof Html5Qrcode === "undefined"){ box.innerHTML = `<span class="badge b-red">Camera scanner library failed to load — use the manual code box below instead.</span>`; return; }
+  if(cameraScanner){ return; } // already running
+  try{
+    cameraScanner = new Html5Qrcode("reader");
+    let locked = false;
+    cameraScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: 220 },
+      (decodedText)=>{
+        if(locked) return; locked = true;
+        tryMarkAttendance(decodedText, "scanResult");
+        setTimeout(()=>{ locked=false; }, 3000);
+      }
+    ).catch(()=>{
+      box.innerHTML = `<span class="badge b-red">Couldn't access camera (permission denied, or no camera on this device) — use the manual code box below.</span>`;
+    });
+  }catch(e){
+    box.innerHTML = `<span class="badge b-red">Camera unavailable — use the manual code box below.</span>`;
+  }
+};
+window.submitCorrection = ()=>{
+  const sessionId=parseInt(document.getElementById("corSession").value);
+  const reason=document.getElementById("corReason").value || "No reason given";
+  state.corrections.push({id:state.nextId++, email:session.email, sessionId, reason, status:"pending"}); save(state); render();
+};
+
+/* ---------- Faculty ---------- */
+function renderFaculty(){
+  const tabs=[{key:"dashboard",label:"Dashboard"},{key:"new",label:"New Session"},{key:"corrections",label:"Corrections"}];
+  let body="";
+  if(currentTab==="dashboard"){
+    body=`<div class="card"><h3>Recent Sessions</h3><p class="muted">Tap "Show code" any time to get a session's manual code again — you don't have to regenerate it.</p><div class="tableWrap"><table><tr><th>Subject</th><th>Status</th><th>Present</th><th></th></tr>
+      ${state.sessions.slice().reverse().map(s=>`<tr><td>${subjName(s.subjectId)}</td><td>${badge(s.status==='active'&&Date.now()<s.expiresAt?'green':'red')}</td><td>${state.records.filter(r=>r.sessionId===s.id).length}</td><td><button class="btn outline" onclick="toggleCode(${s.id})">Show code</button></td></tr>
+      <tr id="coderow-${s.id}" class="hidden"><td colspan="4"><code>${s.token}</code> ${Date.now()<s.expiresAt?`<span class="muted">(expires ${new Date(s.expiresAt).toLocaleTimeString()})</span>`:`<span class="badge b-red">expired</span>`}</td></tr>`).join("") || '<tr><td colspan=4 class="muted">No sessions yet.</td></tr>'}
+    </table></div></div>`;
+  } else if(currentTab==="new"){
+    body=`<div class="card"><h3>Create Attendance Session</h3>
+      <select id="subjSel">${state.subjects.map(s=>`<option value="${s.id}">${s.name}</option>`).join("")}</select>
+      <input id="dur" type="number" value="2" min="1"> <span class="muted">minutes valid — keep this short (1-2 min) in real use so a shared code goes stale before it can be reused</span>
+      <button class="btn" onclick="createSession()">Generate QR</button>
+      <div id="qrArea"></div></div>`;
+  } else if(currentTab==="corrections"){
+    const pending = state.corrections.filter(c=>c.status==="pending");
+    body=`<div class="card"><h3>Pending Correction Requests</h3><div class="tableWrap"><table><tr><th>Student</th><th>Subject</th><th>Reason</th><th></th></tr>
+      ${pending.map(c=>`<tr><td>${state.users[c.email]?.name}</td><td>${subjName(state.sessions.find(s=>s.id===c.sessionId)?.subjectId)}</td><td>${c.reason}</td>
+        <td><button class="btn" onclick="decideCorrection(${c.id},true)">Approve</button> <button class="btn outline" onclick="decideCorrection(${c.id},false)">Reject</button></td></tr>`).join("") || '<tr><td colspan=4 class="muted">None pending.</td></tr>'}
+    </table></div></div>`;
+  }
+  el(renderTopbar()+nav(tabs,currentTab)+body);
+}
+window.toggleCode = (id)=>{
+  const row = document.getElementById("coderow-"+id);
+  if(row) row.classList.toggle("hidden");
+};
+window.createSession = ()=>{
+  const subjectId = parseInt(document.getElementById("subjSel").value);
+  const mins = parseInt(document.getElementById("dur").value)||10;
+  const id = state.nextId++;
+  const token = "ATX-"+id+"-"+Math.random().toString(36).slice(2,10);
+  const s = {id, subjectId, token, status:"active", expiresAt: Date.now()+mins*60000};
+  state.sessions.push(s); save(state);
+  const area=document.getElementById("qrArea");
+  area.innerHTML = `<div id="qrbox"></div><p class="muted" style="text-align:center">Manual code: <code>${token}</code></p><p id="cd" style="text-align:center"></p>`;
+  new QRCode(document.getElementById("qrbox"), {text:token, width:200, height:200});
+  const cdEl=document.getElementById("cd");
+  const t=setInterval(()=>{
+    const left=Math.max(0, Math.round((s.expiresAt-Date.now())/1000));
+    cdEl.textContent = left>0 ? `Expires in ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}` : "Expired";
+    if(left<=0) clearInterval(t);
+  },1000);
+};
+window.decideCorrection = (id, approve)=>{
+  const c = state.corrections.find(x=>x.id===id);
+  c.status = approve ? "approved" : "rejected";
+  if(approve) state.records.push({sessionId:c.sessionId, email:c.email});
+  save(state); render();
+};
+
+/* ---------- Admin ---------- */
+function renderAdmin(){
+  const tabs=[{key:"dashboard",label:"Dashboard"},{key:"students",label:"Students"},{key:"faculty",label:"Faculty"},{key:"subjects",label:"Subjects"}];
+  const students = Object.entries(state.users).filter(([,u])=>u.role==="student");
+  const faculty = Object.entries(state.users).filter(([,u])=>u.role==="faculty");
+  let body="";
+  if(currentTab==="dashboard"){
+    const totalSessions = state.sessions.length, totalRecords = state.records.length;
+    body = `<div class="grid">
+      <div class="card stat"><div class="muted">Students</div><h2>${students.length}</h2></div>
+      <div class="card stat"><div class="muted">Faculty</div><h2>${faculty.length}</h2></div>
+      <div class="card stat"><div class="muted">Subjects</div><h2>${state.subjects.length}</h2></div>
+      <div class="card stat"><div class="muted">Sessions</div><h2>${totalSessions}</h2></div>
+      <div class="card stat"><div class="muted">Check-ins</div><h2>${totalRecords}</h2></div>
+    </div>
+    <div class="card"><h3>Subject-wise attendance</h3><div class="tableWrap"><table><tr><th>Subject</th><th>Sessions</th><th>Check-ins</th></tr>
+    ${state.subjects.map(sub=>{
+      const ss=state.sessions.filter(s=>s.subjectId===sub.id);
+      const rc=state.records.filter(r=>ss.some(s=>s.id===r.sessionId));
+      return `<tr><td>${sub.name}</td><td>${ss.length}</td><td>${rc.length}</td></tr>`;
+    }).join("")}
+    </table></div></div>`;
+  } else if(currentTab==="students" || currentTab==="faculty"){
+    const isStudents = currentTab==="students";
+    const rows = isStudents ? students : faculty;
+    body = `<div class="card"><h3>Add ${isStudents?"Student":"Faculty"}</h3>
+      <input id="anName" placeholder="Full name">
+      <input id="anEmail" placeholder="Email">
+      <input id="anPw" placeholder="Password" type="password">
+      <button class="btn" onclick="adminAddUser('${isStudents?"student":"faculty"}')">Add ${isStudents?"Student":"Faculty"}</button>
+    </div>
+    <div class="card"><h3>${isStudents?"Students":"Faculty"} (${rows.length})</h3><div class="tableWrap"><table><tr><th>Name</th><th>Email</th><th>Status</th><th></th></tr>
+    ${rows.map(([email,u])=>`<tr><td>${u.name}</td><td>${email}</td><td>${badge(u.active===false?"red":"green")}</td>
+      <td><button class="btn outline" onclick="adminToggleActive('${email}')">${u.active===false?"Activate":"Deactivate"}</button></td></tr>`).join("") || `<tr><td colspan=4 class="muted">None yet.</td></tr>`}
+    </table></div></div>`;
+  } else if(currentTab==="subjects"){
+    body = `<div class="card"><h3>Add Subject</h3>
+      <input id="subName" placeholder="Subject name">
+      <input id="subCode" placeholder="Code">
+      <button class="btn" onclick="adminAddSubject()">Add Subject</button>
+    </div>
+    <div class="card"><h3>Subjects (${state.subjects.length})</h3><div class="tableWrap"><table><tr><th>Name</th><th>Code</th></tr>
+    ${state.subjects.map(s=>`<tr><td>${s.name}</td><td>${s.code}</td></tr>`).join("")}
+    </table></div></div>`;
+  }
+  el(renderTopbar()+nav(tabs,currentTab)+body);
+}
+window.adminAddUser = (role)=>{
+  const name=(document.getElementById("anName").value||"").trim();
+  const email=(document.getElementById("anEmail").value||"").trim().toLowerCase();
+  const pw=document.getElementById("anPw").value||"";
+  if(!name||!email||!pw){ alert("Fill all fields."); return; }
+  if(state.users[email]){ alert("An account with this email already exists."); return; }
+  state.users[email]={password:pw, role, name, active:true, roll: role==="student"?("ADM-"+Math.random().toString(36).slice(2,7).toUpperCase()):undefined};
+  save(state); render();
+};
+window.adminToggleActive = (email)=>{
+  const u=state.users[email];
+  u.active = u.active===false ? true : false;
+  save(state); render();
+};
+window.adminAddSubject = ()=>{
+  const name=(document.getElementById("subName").value||"").trim();
+  const code=(document.getElementById("subCode").value||"").trim();
+  if(!name||!code){ alert("Fill both fields."); return; }
+  const id = Math.max(0,...state.subjects.map(s=>s.id))+1;
+  state.subjects.push({id, name, code});
+  save(state); render();
+};
+
+render();
+</script>
+</body>
+</html>
